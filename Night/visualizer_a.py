@@ -79,9 +79,11 @@ if __name__ == "__main__":
             
             h, w = 360, 480
             resized = [cv2.resize(f, (w, h)) for f in processed]
-            while len(resized) < 4: resized.append(np.zeros((h, w, 3), dtype=np.uint8))
+            while len(resized) < 6: resized.append(np.zeros((h, w, 3), dtype=np.uint8))
             
-            canvas = np.vstack((np.hstack(resized[:2]), np.hstack(resized[2:4])))
+            row1 = np.hstack(resized[:3])
+            row2 = np.hstack(resized[3:6])
+            canvas = np.vstack((row1, row2))
             cv2.imshow("Night Visualizer Mode A (Batched Threads)", canvas)
         
         if cv2.waitKey(1) & 0xFF == ord('q'): break

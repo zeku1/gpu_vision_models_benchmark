@@ -78,18 +78,23 @@ if __name__ == "__main__":
         threads.append(threading.Thread(target=worker))
     for t in threads: t.start()
 
+    last_frames = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in VIDEO_FILES]
     cv2.namedWindow("Night Visualizer Mode C (Pipeline/Queues)", cv2.WINDOW_NORMAL)
     while True:
-        frames = []
-        for q in display_queues:
-            try: frames.append(q.get(timeout=0.01))
-            except: frames.append(np.zeros((480, 640, 3), dtype=np.uint8))
+        for i, q in enumerate(display_queues):
+            try:
+                frame = q.get(timeout=0.001)
+                last_frames[i] = frame
+            except:
+                pass
             
         h, w = 360, 480
-        resized = [cv2.resize(f, (w, h)) for f in frames]
-        while len(resized) < 4: resized.append(np.zeros((h, w, 3), dtype=np.uint8))
+        resized = [cv2.resize(f, (w, h)) for f in last_frames]
+        while len(resized) < 6: resized.append(np.zeros((h, w, 3), dtype=np.uint8))
         
-        canvas = np.vstack((np.hstack(resized[:2]), np.hstack(resized[2:4])))
+        row1 = np.hstack(resized[:3])
+        row2 = np.hstack(resized[3:6])
+        canvas = np.vstack((row1, row2))
         cv2.imshow("Night Visualizer Mode C (Pipeline/Queues)", canvas)
         
         if cv2.waitKey(1) & 0xFF == ord('q'): break

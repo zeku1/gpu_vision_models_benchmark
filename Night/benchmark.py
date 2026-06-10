@@ -6,6 +6,7 @@ import numpy as np
 import threading
 import queue
 import multiprocessing
+import subprocess
 from ultralytics import YOLO
 
 os.environ['FLAGS_enable_pir_api'] = '0'
@@ -21,6 +22,39 @@ YOLO10_MODEL_PATH = "../yolov10n.pt"
 
 VEHICLE_CLASSES = [2, 3, 5, 7] 
 PERSON_CLASSES = [0] 
+
+class GPUMonitor:
+    def __init__(self):
+        self.keep_running = True
+        self.utils = []
+        self.mems = []
+        self.thread = threading.Thread(target=self._monitor)
+        
+    def start(self):
+        self.thread.start()
+        
+    def _monitor(self):
+        while self.keep_running:
+            try:
+                output = subprocess.check_output(
+                    ['nvidia-smi', '--query-gpu=utilization.gpu,memory.used', '--format=csv,nounits,noheader'], 
+                    encoding='utf-8')
+                lines = output.strip().split('\n')
+                if lines:
+                    u = float(lines[0].split(',')[0])
+                    m = float(lines[0].split(',')[1])
+                    self.utils.append(u)
+                    self.mems.append(m)
+            except Exception:
+                pass
+            time.sleep(0.5)
+            
+    def stop(self):
+        self.keep_running = False
+        self.thread.join()
+        avg_util = np.mean(self.utils) if self.utils else 0.0
+        avg_mem = np.mean(self.mems) if self.mems else 0.0
+        return avg_util, avg_mem
 
 class VisionPipeline:
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -53,6 +87,8 @@ def run_batched_mode(video_paths, duration=30):
     print("\n--- Running Night Mode A: Threaded + Batched Inference ---")
     caps = [cv2.VideoCapture(p) for p in video_paths]
     pipeline = VisionPipeline()
+    monitor = GPUMonitor()
+    monitor.start()
     
     stop_event = threading.Event()
     frames = [None] * len(caps)
@@ -93,7 +129,8 @@ def run_batched_mode(video_paths, duration=30):
     for t in threads: t.join()
     for c in caps: c.release()
     
-    return total_frames, time.time() - start_time, all_metrics
+    avg_util, avg_mem = monitor.stop()
+    return total_frames, time.time() - start_time, all_metrics, avg_util, avg_mem
 
 def worker_process(video_path, result_queue, duration):
     os.environ['FLAGS_enable_pir_api'] = '0' 
@@ -119,6 +156,8 @@ def run_multiprocessing_mode(video_paths, duration=30):
     print("\n--- Running Night Mode B: Multiprocessing (Independent) ---")
     result_queue = multiprocessing.Queue()
     processes = []
+    monitor = GPUMonitor()
+    monitor.start()
     
     start_time = time.time()
     for path in video_paths:
@@ -134,12 +173,15 @@ def run_multiprocessing_mode(video_paths, duration=30):
         all_metrics.extend(metrics)
         
     for p in processes: p.join()
-    return total_frames, time.time() - start_time, all_metrics
+    avg_util, avg_mem = monitor.stop()
+    return total_frames, time.time() - start_time, all_metrics, avg_util, avg_mem
 
 def run_queue_mode(video_paths, duration=30):
     print("\n--- Running Night Mode C: Thread-based Pipeline with Queues ---")
     frame_queue = queue.Queue(maxsize=50)
     stop_event = threading.Event()
+    monitor = GPUMonitor()
+    monitor.start()
     
     def producer(path):
         cap = cv2.VideoCapture(path)
@@ -179,28 +221,39 @@ def run_queue_mode(video_paths, duration=30):
     
     for t in producers + consumers: t.join()
     
-    return processed_count[0], time.time() - start_time, all_metrics
+    avg_util, avg_mem = monitor.stop()
+    return processed_count[0], time.time() - start_time, all_metrics, avg_util, avg_mem
 
-def print_report(name, total_frames, total_time, metrics):
+def print_report(name, total_frames, total_time, metrics, avg_util, avg_mem):
     if not metrics:
         print(f"\nRESULTS FOR {name}: No data collected.")
         return
     fps = total_frames / total_time
     avg_latency = np.mean([m['latency'] for m in metrics])
+    
+    v8_confs = [m['v8_avg_conf'] for m in metrics if m.get('v8_avg_conf', 0) > 0]
+    v10_confs = [m['v10_avg_conf'] for m in metrics if m.get('v10_avg_conf', 0) > 0]
+    avg_v8_conf = np.mean(v8_confs) if v8_confs else 0.0
+    avg_v10_conf = np.mean(v10_confs) if v10_confs else 0.0
+    
     print(f"\nRESULTS FOR {name}:")
-    print(f"  Total Frames: {total_frames}")
-    print(f"  Overall FPS:  {fps:.2f}")
-    print(f"  Avg Latency:  {avg_latency:.1f}ms")
+    print(f"  Total Frames:   {total_frames}")
+    print(f"  Overall FPS:    {fps:.2f}")
+    print(f"  Avg Latency:    {avg_latency:.1f}ms")
+    print(f"  Accuracy (V8):  {avg_v8_conf*100:.1f}% avg confidence")
+    print(f"  Accuracy (V10): {avg_v10_conf*100:.1f}% avg confidence")
+    print(f"  Avg GPU Util:   {avg_util:.1f}%")
+    print(f"  Avg GPU Mem:    {avg_mem:.0f} MB")
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     TEST_DURATION = 20 
     
-    f_a, t_a, m_a = run_batched_mode(VIDEO_FILES, TEST_DURATION)
-    print_report("NIGHT MODE A (Threaded + Batched)", f_a, t_a, m_a)
+    f_a, t_a, m_a, u_a, mem_a = run_batched_mode(VIDEO_FILES, TEST_DURATION)
+    print_report("NIGHT MODE A (Threaded + Batched)", f_a, t_a, m_a, u_a, mem_a)
     
-    f_b, t_b, m_b = run_multiprocessing_mode(VIDEO_FILES, TEST_DURATION)
-    print_report("NIGHT MODE B (Multiprocessing)", f_b, t_b, m_b)
+    f_b, t_b, m_b, u_b, mem_b = run_multiprocessing_mode(VIDEO_FILES, TEST_DURATION)
+    print_report("NIGHT MODE B (Multiprocessing)", f_b, t_b, m_b, u_b, mem_b)
     
-    f_c, t_c, m_c = run_queue_mode(VIDEO_FILES, TEST_DURATION)
-    print_report("NIGHT MODE C (Threaded Queues)", f_c, t_c, m_c)
+    f_c, t_c, m_c, u_c, mem_c = run_queue_mode(VIDEO_FILES, TEST_DURATION)
+    print_report("NIGHT MODE C (Threaded Queues)", f_c, t_c, m_c, u_c, mem_c)
